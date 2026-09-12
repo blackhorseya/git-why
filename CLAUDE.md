@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`git-why <file>:<line>` — a small Go CLI that stitches `git blame`, `git log` and friends into one human-readable report about why a line exists. v0.1 is deliberately small: local Git only, no network, no GitHub API, no LLM, no config files, no persistent state. When scope is unclear, pick the smaller implementation. GitHub context (v0.2) and an optional `git-why ask` AI mode (v0.3) are future work — don't build toward them yet.
+`git-why <file>:<line>` — a small Go CLI that stitches `git blame`, `git log` and friends into one human-readable report about why a line exists. v0.1 covered local Git history; v0.2 adds the pull request behind the commit (title, description, closed issues, review threads) fetched through the GitHub CLI. Still no network code of our own, no LLM, no config files, no persistent state. When scope is unclear, pick the smaller implementation. An optional `git-why ask` AI mode (v0.3) is future work — don't build toward it yet.
 
 ## Commands
 
@@ -23,7 +23,7 @@ Validate release config: `goreleaser check`. Releases are cut by pushing a `v*` 
 
 ## Architecture
 
-Four packages under `internal/`, orchestrated by `cli.explain` in `internal/cli/cli.go`:
+Five packages under `internal/`, orchestrated by `cli.explain` in `internal/cli/cli.go`:
 
 ```
 target.Parse → Target.ReadLine        validate syntax, file exists, line in range (no git yet)
@@ -31,6 +31,7 @@ git.Open(dir of file)                 find git, repo toplevel, ensure HEAD exist
 Repo.TrackedPath                      repo-relative path + untracked check
 Repo.Blame                            commit + the line's number/path *in that commit*
 Repo.Commit / ChangedFiles / LineHistory
+cli.pullRequest                       unless --offline: GitHub remote? → github.Client.PullRequest via gh
 presenter.Render
 ```
 
@@ -44,24 +45,35 @@ presenter.Render
 - `run` sets `LC_ALL=C` because some error detection matches stderr (e.g. "not a git repository"), and `GIT_LITERAL_PATHSPECS=1` so `*` / `[` in file names aren't globbed.
 - Changed files use `git log -1 --diff-merges=first-parent`, not `diff-tree`: `diff-tree` ignores `--first-parent` on merges and lists every parent's diff. This sets the minimum Git version to 2.31 (documented in README).
 - Blame porcelain marks *every* parentless commit as `boundary`, including a normal repo's first commit. `Blame` only keeps `Boundary` when `rev-parse --is-shallow-repository` is true.
+- `RemoteURL` uses `git remote get-url` (not `git config`) so `url.<base>.insteadOf` rewrites are applied.
+
+### GitHub client invariants (`internal/github`)
+
+- All GitHub access is one `gh api graphql` call (`pullRequestQuery` in `parse.go`): the commit's `associatedPullRequests` with `closingIssuesReferences` and `reviewThreads`. gh owns authentication, `GH_TOKEN`, multiple accounts and hosts; git-why never sees a token. Don't add a REST/HTTP client.
+- Only github.com remotes are recognised (`ParseRemote`); `Remote.Host` exists so `--hostname` is already wired for GHES later.
+- Error mapping is driven by gh's observable behaviour, verified against the real API: exit 4 → `ErrNotLoggedIn`; stderr `HTTP 401` → `ErrBadCredentials`; stderr "rate limit" → `ErrRateLimited`; stdout GraphQL `errors[].type == NOT_FOUND` → `ErrNotFound` (repo missing or not visible); `object: null` → `ErrCommitNotFound` (not pushed); empty `nodes` → `ErrNoPullRequest`. Anything else stays a `*CommandError` whose message is gh's first stderr line.
+- `pick` prefers the earliest-merged PR (the one that introduced the commit) over later/unmerged ones.
+- In `cli`, a GitHub problem never changes the exit code or writes to stderr: `cli.pullRequest` turns it into `presenter.GitHub.Note`, shown dimmed under "Pull request". A nil `presenter.GitHub` (offline, no GitHub remote) omits the section entirely. The gh call is bounded by `githubTimeout`; a parent-context cancel (Ctrl-C) still aborts the command.
+- Remote preference is `upstream`, then `origin`, then the rest (`cli.preferRemotes`) — forks keep their PRs upstream.
 
 ### Errors and exit codes
 
-Sentinel errors live in `target` (`ErrSyntax`, `ErrLine`, `ErrNotFound`, `ErrIsDir`, `ErrOutOfRange`) and `git` (`ErrGitNotFound`, `ErrNotRepository`, `ErrNoCommits`, `ErrUntracked`, `ErrNotCommitted`, `ErrNoHistory`, plus `*CommandError`). Cobra argument/flag errors are wrapped in `*usageError` via the `Args` func and `SetFlagErrorFunc`. `cli.hint` maps errors to a `hint:` line and `cli.exitCode` maps them to exit codes.
+Sentinel errors live in `target` (`ErrSyntax`, `ErrLine`, `ErrNotFound`, `ErrIsDir`, `ErrOutOfRange`), `git` (`ErrGitNotFound`, `ErrNotRepository`, `ErrNoCommits`, `ErrUntracked`, `ErrNotCommitted`, `ErrNoHistory`, plus `*CommandError`) and `github` (see above; these never reach `Run`). Cobra argument/flag errors are wrapped in `*usageError` via the `Args` func and `SetFlagErrorFunc`. `cli.hint` maps errors to a `hint:` line, `cli.exitCode` maps them to exit codes, and `cli.githubNote` maps GitHub errors to the in-report note.
 
 The exit-code table (0 ok, 1 git/history failure, 2 usage, 3 environment, 4 target) is documented in README.md and pinned by `TestExitCodes` in `internal/cli/cli_test.go` — change both together.
 
 ### Output
 
-`presenter.Render` builds styled text with lipgloss v2 (`charm.land/lipgloss/v2`) and writes through `lipgloss.Fprint`, which strips ANSI automatically when the writer isn't a color terminal. Tests therefore see plain text. If you change the output format, update the golden string in `presenter_test.go`, the e2e assertions in `cli_test.go`, and the example in README.md (README's first screen is the product demo).
+`presenter.Render` builds styled text with lipgloss v2 (`charm.land/lipgloss/v2`) and writes through `lipgloss.Fprint`, which strips ANSI automatically when the writer isn't a color terminal. Tests therefore see plain text. Sections in order: Current line, Introduced / Changed, Pull request, Review discussion (both GitHub sections only when GitHub was consulted; Review discussion only when a PR was found), Changed with, Line history. If you change the output format, update the golden strings in `presenter_test.go` / `presenter/github_test.go`, the e2e assertions in `cli_test.go` / `cli/github_test.go`, and the example in README.md (README's first screen is the product demo).
 
 ## Testing notes
 
-- `internal/testrepo` builds throwaway repos: it isolates git config with `t.Setenv` (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, fixed identity) and gives each `Commit` a deterministic date (`testrepo.Epoch` + 1 day per commit). Because of `t.Setenv` / `t.Chdir`, these tests can't use `t.Parallel`.
+- `internal/testrepo` builds throwaway repos: it isolates git config with `t.Setenv` (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, fixed identity) and gives each `Commit` a deterministic date (`testrepo.Epoch` + 1 day per commit). It also points `GH_CONFIG_DIR` at an empty temp dir and blanks `GH_TOKEN`/`GITHUB_TOKEN`, so a real gh reached by accident exits 4 without touching the network or the developer's accounts. Because of `t.Setenv` / `t.Chdir`, these tests can't use `t.Parallel`.
+- Tests never call the real gh. `testrepo.StubGH(t, stdout, stderr, exitCode)` puts a fake `gh` script first on PATH and records its arguments (`Args()`), so tests assert both the rendered output and the exact gh invocation. To simulate "gh not installed" without losing git, see `gitOnlyPATH` in `cli/github_test.go`.
 - Assert on hashes via `r.Short(hash)` rather than hard-coding them.
 
 ## Code conventions
 
 - Go 1.26: prefer `errors.AsType[T]` and `strings.SplitSeq` (gopls flags the older forms).
-- Receivers: `i` for the infrastructure type (`*git.Repo`), `x` for value/domain types and error types; context parameters are named `c`.
+- Receivers: `i` for the infrastructure types (`*git.Repo`, `*github.Client`), `x` for value/domain types and error types; context parameters are named `c`.
 - Version is injected with `-X main.version=...` (Taskfile, GoReleaser uses `v{{ .Version }}`); `cli.resolveVersion` falls back to `debug.ReadBuildInfo` for `go install ...@vX`.
