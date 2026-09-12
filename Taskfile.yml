@@ -1,0 +1,50 @@
+version: "3"
+
+vars:
+  BIN: bin/git-why
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  LDFLAGS: -s -w -X main.version={{.VERSION}}
+
+tasks:
+  default:
+    desc: List available tasks
+    silent: true
+    cmds:
+      - "{{.TASK_EXE}} --list"
+
+  build:
+    desc: Compile ./bin/git-why
+    cmds:
+      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.BIN}} ./cmd/git-why
+
+  test:
+    desc: Run unit and integration tests (needs git on PATH)
+    cmds:
+      - go test -race ./...
+
+  lint:
+    desc: Run go vet and golangci-lint
+    cmds:
+      - go vet ./...
+      - golangci-lint run
+
+  fmt:
+    desc: Format code with the configured formatters
+    cmds:
+      - golangci-lint fmt
+
+  install:
+    desc: Install git-why into GOBIN
+    cmds:
+      - go install -trimpath -ldflags "{{.LDFLAGS}}" ./cmd/git-why
+
+  snapshot:
+    desc: Build release archives into ./dist without publishing
+    cmds:
+      - goreleaser release --snapshot --clean
+
+  clean:
+    desc: Remove build output
+    cmds:
+      - rm -rf bin dist
