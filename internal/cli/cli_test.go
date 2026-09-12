@@ -81,6 +81,9 @@ func TestRunExplainsLine(t *testing.T) {
 	if strings.Contains(res.stdout, "Changed with\n  internal/payment/service.go") {
 		t.Errorf("Changed with lists the target file itself:\n%s", res.stdout)
 	}
+	if strings.Contains(res.stdout, "Pull request") {
+		t.Errorf("a repository without remotes shows a pull request section:\n%s", res.stdout)
+	}
 	if res.stderr != "" {
 		t.Errorf("unexpected stderr: %s", res.stderr)
 	}
@@ -155,7 +158,7 @@ func TestVersionAndHelp(t *testing.T) {
 	if res.code != exitOK {
 		t.Fatalf("--help exit code = %d", res.code)
 	}
-	for _, want := range []string{"git blame tells you who. git-why tells you why.", "git-why <file>:<line>", "--version"} {
+	for _, want := range []string{"git blame tells you who. git-why tells you why.", "git-why <file>:<line>", "--version", "--offline"} {
 		if !strings.Contains(res.stdout, want) {
 			t.Errorf("--help missing %q:\n%s", want, res.stdout)
 		}

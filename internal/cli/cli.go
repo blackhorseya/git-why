@@ -9,10 +9,13 @@ import (
 	"io"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/blackhorseya/git-why/internal/git"
+	"github.com/blackhorseya/git-why/internal/github"
 	"github.com/blackhorseya/git-why/internal/presenter"
 	"github.com/blackhorseya/git-why/internal/target"
 )
@@ -26,8 +29,12 @@ const (
 	exitTarget  = 4 // file missing, untracked, or line out of range
 )
 
-// historyLimit caps how many commits the line history shows.
-const historyLimit = 10
+const (
+	// historyLimit caps how many commits the line history shows.
+	historyLimit = 10
+	// githubTimeout bounds the gh call so a slow network cannot hang git-why.
+	githubTimeout = 10 * time.Second
+)
 
 // Run executes git-why with args (excluding the program name) and returns
 // the process exit code.
@@ -51,23 +58,28 @@ func Run(c context.Context, version string, args []string, stdout, stderr io.Wri
 }
 
 func newCommand(version string) *cobra.Command {
+	var offline bool
 	cmd := &cobra.Command{
 		Use:   "git-why <file>:<line>",
 		Short: "Explain the Git history behind a line of code",
 		Long: "git blame tells you who. git-why tells you why.\n\n" +
 			"Shows the commit that last changed a line, its author, date and message,\n" +
-			"the other files changed with it, and the line's history.",
+			"the other files changed with it, and the line's history.\n\n" +
+			"When the repository has a GitHub remote, the pull request behind the commit\n" +
+			"and its review discussion are shown too, fetched with the GitHub CLI (gh).",
 		Example: "  git-why internal/payment/service.go:87\n" +
-			"  git why main.go:42",
+			"  git why main.go:42\n" +
+			"  git why --offline main.go:42",
 		Version:           resolveVersion(version),
 		Args:              oneTarget,
 		SilenceUsage:      true,
 		SilenceErrors:     true,
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return explain(cmd.Context(), args[0], cmd.OutOrStdout())
+			return explain(cmd.Context(), args[0], offline, cmd.OutOrStdout())
 		},
 	}
+	cmd.Flags().BoolVar(&offline, "offline", false, "skip the GitHub pull request lookup")
 	cmd.SetVersionTemplate("git-why {{.Version}}\n")
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return &usageError{err: err}
@@ -87,8 +99,8 @@ func oneTarget(_ *cobra.Command, args []string) error {
 }
 
 // explain gathers everything git-why reports about the line named by arg
-// and renders it to w.
-func explain(c context.Context, arg string, w io.Writer) error {
+// and renders it to w. With offline set, GitHub is not consulted.
+func explain(c context.Context, arg string, offline bool, w io.Writer) error {
 	t, err := target.Parse(arg)
 	if err != nil {
 		return err
@@ -133,6 +145,14 @@ func explain(c context.Context, arg string, w io.Writer) error {
 		history = history[:historyLimit]
 	}
 
+	var gh *presenter.GitHub
+	if !offline {
+		gh = pullRequest(c, repo, commit)
+		if err := c.Err(); err != nil {
+			return err // interrupted while waiting for gh
+		}
+	}
+
 	return presenter.Render(w, presenter.Report{
 		Path:             path,
 		Line:             t.Line,
@@ -142,7 +162,99 @@ func explain(c context.Context, arg string, w io.Writer) error {
 		ChangedWith:      without(files, path, blame.OrigPath),
 		History:          history,
 		HistoryTruncated: truncated,
+		GitHub:           gh,
 	})
+}
+
+// pullRequest looks up the pull request behind commit through gh. It
+// returns nil when the repository has no GitHub remote. Any other problem
+// becomes a note in the report instead of an error: GitHub context is a
+// bonus on top of the local history, never a reason to withhold it.
+func pullRequest(c context.Context, repo *git.Repo, commit git.Commit) *presenter.GitHub {
+	remote, ok, err := githubRemote(c, repo)
+	if err != nil {
+		return &presenter.GitHub{Note: "GitHub lookup failed: " + err.Error()}
+	}
+	if !ok {
+		return nil
+	}
+
+	pr, err := lookupPullRequest(c, remote, commit.Hash)
+	if err != nil {
+		return &presenter.GitHub{Note: githubNote(err, remote, commit.ShortHash)}
+	}
+	return &presenter.GitHub{PullRequest: &pr}
+}
+
+func lookupPullRequest(c context.Context, remote github.Remote, hash string) (github.PullRequest, error) {
+	gh, err := github.Find()
+	if err != nil {
+		return github.PullRequest{}, err
+	}
+	c, cancel := context.WithTimeout(c, githubTimeout)
+	defer cancel()
+	return gh.PullRequest(c, remote, hash)
+}
+
+// githubRemote finds the GitHub repository the working copy tracks. A fork
+// usually keeps the pull requests on upstream, so that remote is preferred
+// over origin, which is preferred over any other.
+func githubRemote(c context.Context, repo *git.Repo) (github.Remote, bool, error) {
+	names, err := repo.Remotes(c)
+	if err != nil {
+		return github.Remote{}, false, err
+	}
+	for _, name := range preferRemotes(names) {
+		url, err := repo.RemoteURL(c, name)
+		if err != nil {
+			continue // a half-configured remote should not hide the others
+		}
+		if remote, ok := github.ParseRemote(url); ok {
+			return remote, true, nil
+		}
+	}
+	return github.Remote{}, false, nil
+}
+
+// preferRemotes orders remote names as upstream, origin, then the rest in
+// the order given.
+func preferRemotes(names []string) []string {
+	preferred := []string{"upstream", "origin"}
+	var out []string
+	for _, p := range preferred {
+		if slices.Contains(names, p) {
+			out = append(out, p)
+		}
+	}
+	for _, n := range names {
+		if !slices.Contains(preferred, n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// githubNote explains, in one line, why the pull request could not be shown.
+func githubNote(err error, remote github.Remote, short string) string {
+	switch {
+	case errors.Is(err, github.ErrGHNotFound):
+		return "gh is not installed; get the GitHub CLI from https://cli.github.com, or pass --offline"
+	case errors.Is(err, github.ErrNotLoggedIn):
+		return "gh is not logged in; run `gh auth login`, or pass --offline"
+	case errors.Is(err, github.ErrBadCredentials):
+		return "GitHub rejected gh's credentials; run `gh auth login`"
+	case errors.Is(err, github.ErrNotFound):
+		return fmt.Sprintf("%s is not on GitHub or not visible to the gh account; check `gh auth status`", remote)
+	case errors.Is(err, github.ErrCommitNotFound):
+		return fmt.Sprintf("%s is not on GitHub yet; push it first", short)
+	case errors.Is(err, github.ErrNoPullRequest):
+		return fmt.Sprintf("no pull request for %s", short)
+	case errors.Is(err, github.ErrRateLimited):
+		return "GitHub API rate limit exceeded; try again later"
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Sprintf("GitHub lookup timed out after %s", githubTimeout)
+	}
+	return "GitHub lookup failed: " + err.Error()
 }
 
 // exitCode maps an error returned by the command to the process exit code
