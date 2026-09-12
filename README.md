@@ -36,8 +36,6 @@ Line history
   f8219de  2026-08-01  feat: initial payment service
 ```
 
-<!-- TODO(release): replace with docs/demo.gif before v0.1.0 -->
-
 ## Install
 
 **Go**
