@@ -177,6 +177,25 @@ func (i *Repo) LineHistory(c context.Context, path string, n int, from string, l
 	return commits, nil
 }
 
+// Remotes lists the names of the repository's remotes.
+func (i *Repo) Remotes(c context.Context) ([]string, error) {
+	out, err := i.git(c, "remote")
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(out), nil
+}
+
+// RemoteURL returns the fetch URL of the named remote. Git applies any
+// url.<base>.insteadOf rewriting, so the result is the URL actually used.
+func (i *Repo) RemoteURL(c context.Context, name string) (string, error) {
+	out, err := i.git(c, "remote", "get-url", "--", name)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 func (i *Repo) git(c context.Context, args ...string) (string, error) {
 	return run(c, i.bin, i.root, args...)
 }
