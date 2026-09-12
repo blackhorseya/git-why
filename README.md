@@ -14,24 +14,26 @@ git-why internal/payment/service.go:87
 ```
 Why does this line exist?
 
-Current line
+Current line  internal/payment/service.go:87
   if err := repository.Exists(ctx, id); err != nil {
 
 Introduced / Changed
   Commit: 8ac912f
-  Author: Sean
+  Author: Sean <sean@example.com>
   Date:   2026-08-21
 
   fix: prevent duplicate payment processing
+
+  Retries from the gateway could charge twice.
 
 Changed with
   internal/payment/repository.go
   internal/payment/service_test.go
 
 Line history
-  8ac912f  fix: prevent duplicate payment processing
-  a912bc1  chore: change Redis TTL to 24h
-  f8219de  feat: initial payment service
+  8ac912f  2026-08-21  fix: prevent duplicate payment processing
+  a912bc1  2026-08-20  chore: change Redis TTL to 24h
+  f8219de  2026-08-01  feat: initial payment service
 ```
 
 <!-- TODO(release): replace with docs/demo.gif before v0.1.0 -->
@@ -55,8 +57,8 @@ tar -xzf git-why_*_darwin_arm64.tar.gz
 mv git-why /usr/local/bin/
 ```
 
-`git-why` shells out to your local `git`, so Git must be installed. No
-network access, no telemetry, no config files.
+`git-why` shells out to your local `git`, so Git 2.31 or newer must be
+installed. No network access, no telemetry, no config files.
 
 ## Usage
 
@@ -97,8 +99,8 @@ by hand and stitches the results together:
 | Question | Git command |
 |----------|-------------|
 | Which commit last touched this line? | `git blame --porcelain -L <n>,<n>` |
-| Who, when, and why? | `git show --format=...` |
-| What else changed in that commit? | `git diff-tree --name-only` |
+| Who, when, and why? | `git log -1 --format=...` |
+| What else changed in that commit? | `git log -1 --name-only --diff-merges=first-parent` |
 | How did this line evolve? | `git log -L <n>,<n>:<file>` |
 
 The line history starts from the commit `blame` reports, using the file name
@@ -117,10 +119,12 @@ elsewhere in the file do not throw it off.
 
 ## Development
 
+Developer commands use [Task](https://taskfile.dev) (`brew install go-task`):
+
 ```
-make build    # → ./bin/git-why
-make test
-make lint
+task build    # → ./bin/git-why
+task test
+task lint
 ```
 
 Integration tests create throwaway Git repositories under the Go test temp
