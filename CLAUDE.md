@@ -50,7 +50,7 @@ presenter.Render
 ### GitHub client invariants (`internal/github`)
 
 - All GitHub access is one `gh api graphql` call (`pullRequestQuery` in `parse.go`): the commit's `associatedPullRequests` with `closingIssuesReferences` and `reviewThreads`. gh owns authentication, `GH_TOKEN`, multiple accounts and hosts; git-why never sees a token. Don't add a REST/HTTP client.
-- Only github.com remotes are recognised (`ParseRemote`); `Remote.Host` exists so `--hostname` is already wired for GHES later.
+- `ParseRemote` accepts remotes on the hosts returned by `github.Hosts()`: github.com plus the GitHub Enterprise Server named by `GH_HOST` (the same variable gh reads). `Remote.Host` is passed to gh as `--hostname`, so gh picks that host's credentials.
 - Error mapping is driven by gh's observable behaviour, verified against the real API: exit 4 → `ErrNotLoggedIn`; stderr `HTTP 401` → `ErrBadCredentials`; stderr "rate limit" → `ErrRateLimited`; stdout GraphQL `errors[].type == NOT_FOUND` → `ErrNotFound` (repo missing or not visible); `object: null` → `ErrCommitNotFound` (not pushed); empty `nodes` → `ErrNoPullRequest`. Anything else stays a `*CommandError` whose message is gh's first stderr line.
 - `pick` prefers the earliest-merged PR (the one that introduced the commit) over later/unmerged ones.
 - In `cli`, a GitHub problem never changes the exit code or writes to stderr: `cli.pullRequest` turns it into `presenter.GitHub.Note`, shown dimmed under "Pull request". A nil `presenter.GitHub` (offline, no GitHub remote) omits the section entirely. The gh call is bounded by `githubTimeout` (a package variable so tests can shrink it); a parent-context cancel (Ctrl-C) still aborts the command. `run` sets `cmd.WaitDelay` so a killed gh that left a child holding the stdio pipes cannot keep `Run` blocked past the bound.
@@ -68,7 +68,7 @@ The exit-code table (0 ok, 1 git/history failure, 2 usage, 3 environment, 4 targ
 
 ## Testing notes
 
-- `internal/testrepo` builds throwaway repos: it isolates git config with `t.Setenv` (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, fixed identity) and gives each `Commit` a deterministic date (`testrepo.Epoch` + 1 day per commit). It also points `GH_CONFIG_DIR` at an empty temp dir and blanks `GH_TOKEN`/`GITHUB_TOKEN`, so a real gh reached by accident exits 4 without touching the network or the developer's accounts. Because of `t.Setenv` / `t.Chdir`, these tests can't use `t.Parallel`.
+- `internal/testrepo` builds throwaway repos: it isolates git config with `t.Setenv` (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, fixed identity) and gives each `Commit` a deterministic date (`testrepo.Epoch` + 1 day per commit). It also points `GH_CONFIG_DIR` at an empty temp dir and blanks `GH_TOKEN`/`GITHUB_TOKEN`/`GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN`/`GH_HOST`, so a real gh reached by accident exits 4 without touching the network or the developer's accounts. Because of `t.Setenv` / `t.Chdir`, these tests can't use `t.Parallel`.
 - Tests never call the real gh. `testrepo.StubGH(t, stdout, stderr, exitCode)` puts a fake `gh` script first on PATH and records its arguments (`Args()`), so tests assert both the rendered output and the exact gh invocation. To simulate "gh not installed" without losing git, see `gitOnlyPATH` in `cli/github_test.go`.
 - Assert on hashes via `r.Short(hash)` rather than hard-coding them.
 

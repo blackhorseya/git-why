@@ -5,6 +5,8 @@ package github
 
 import (
 	"net/url"
+	"os"
+	"slices"
 	"strings"
 )
 
@@ -20,13 +22,26 @@ func (x Remote) String() string {
 	return x.Owner + "/" + x.Name
 }
 
-// ParseRemote extracts the repository from a Git remote URL on github.com.
-// It understands every form Git accepts: scp-like (git@github.com:o/r.git),
-// ssh://, https://, http:// and git://. It reports false for anything else,
-// including repositories on other hosts.
-func ParseRemote(raw string) (Remote, bool) {
+// Hosts returns the GitHub hosts git-why recognises: github.com and, when
+// GH_HOST is set, the GitHub Enterprise Server it names. gh reads the same
+// variable, so both agree on which host's credentials to use.
+func Hosts() []string {
+	hosts := []string{"github.com"}
+	if h := strings.ToLower(strings.TrimSpace(os.Getenv("GH_HOST"))); h != "" && h != "github.com" {
+		hosts = append(hosts, h)
+	}
+	return hosts
+}
+
+// ParseRemote extracts the repository from a Git remote URL on one of hosts
+// (compared case-insensitively). It understands every form Git accepts:
+// scp-like (git@github.com:o/r.git), ssh://, https://, http:// and git://.
+// It reports false for anything else, including repositories on other
+// hosts.
+func ParseRemote(raw string, hosts []string) (Remote, bool) {
 	host, path := splitRemote(strings.TrimSpace(raw))
-	if !strings.EqualFold(host, "github.com") {
+	host = strings.ToLower(host)
+	if host == "" || !slices.Contains(hosts, host) {
 		return Remote{}, false
 	}
 
@@ -35,7 +50,7 @@ func ParseRemote(raw string) (Remote, bool) {
 	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
 		return Remote{}, false
 	}
-	return Remote{Host: "github.com", Owner: owner, Name: name}, true
+	return Remote{Host: host, Owner: owner, Name: name}, true
 }
 
 // splitRemote returns the host and path of a remote URL, or empty strings

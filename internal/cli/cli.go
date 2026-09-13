@@ -204,12 +204,13 @@ func githubRemote(c context.Context, repo *git.Repo) (github.Remote, bool, error
 	if err != nil {
 		return github.Remote{}, false, err
 	}
+	hosts := github.Hosts()
 	for _, name := range preferRemotes(names) {
 		url, err := repo.RemoteURL(c, name)
 		if err != nil {
 			continue // a half-configured remote should not hide the others
 		}
-		if remote, ok := github.ParseRemote(url); ok {
+		if remote, ok := github.ParseRemote(url, hosts); ok {
 			return remote, true, nil
 		}
 	}

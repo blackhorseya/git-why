@@ -94,8 +94,9 @@ git why internal/payment/service.go:87
 
 ### GitHub context
 
-When the repository has a remote on github.com, `git-why` also looks up the
-pull request that brought the commit in and shows:
+When the repository has a remote on github.com (or on the GitHub Enterprise
+Server named by `GH_HOST`, the same variable `gh` reads), `git-why` also looks
+up the pull request that brought the commit in and shows:
 
 - the pull request's title, author, merge date and description;
 - the issues it closes;
