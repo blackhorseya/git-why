@@ -3,6 +3,7 @@ package github
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -16,7 +17,7 @@ const fixtureMerged = `{"data":{"repository":{"object":{"associatedPullRequests"
  "body":"Retries could charge twice.","author":{"login":"ada"},
  "closingIssuesReferences":{"nodes":[
   {"number":38,"title":"Duplicate charges","url":"https://github.com/acme/pay/issues/38","state":"CLOSED"}]},
- "reviewThreads":{"nodes":[
+ "reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":"c1"},"nodes":[
   {"path":"internal/payment/service.go","line":87,"isResolved":true,"isOutdated":false,
    "comments":{"totalCount":3,"nodes":[{"body":"Should this be a 409?","url":"https://github.com/acme/pay/pull/42#discussion_r1","author":{"login":"grace"}}]}},
   {"path":"README.md","line":null,"isResolved":false,"isOutdated":true,
@@ -49,6 +50,63 @@ func TestParsePullRequests(t *testing.T) {
 	}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parsePullRequests() =\n%+v\nwant\n%+v", got, want)
+	}
+}
+
+// fixtureMoreThreads is fixtureMerged when GitHub holds back further review
+// threads for another page.
+var fixtureMoreThreads = strings.Replace(fixtureMerged, `"hasNextPage":false`, `"hasNextPage":true`, 1)
+
+// fixtureThreadPages is what gh --paginate prints for threadsQuery: one JSON
+// document per page, back to back with no separator.
+const fixtureThreadPages = `{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":true,"endCursor":"c1"},"nodes":[
+{"path":"internal/payment/service.go","line":87,"isResolved":true,"isOutdated":false,
+ "comments":{"totalCount":3,"nodes":[{"body":"Should this be a 409?","url":"https://github.com/acme/pay/pull/42#discussion_r1","author":{"login":"grace"}}]}}
+]}}}}}{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":"c2"},"nodes":[
+{"path":"README.md","line":null,"isResolved":false,"isOutdated":true,
+ "comments":{"totalCount":1,"nodes":[{"body":"typo","url":"https://github.com/acme/pay/pull/42#discussion_r2","author":null}]}},
+{"path":"internal/payment/service.go","line":90,"isResolved":false,"isOutdated":false,
+ "comments":{"totalCount":1,"nodes":[{"body":"Second page","url":"https://github.com/acme/pay/pull/42#discussion_r3","author":{"login":"linus"}}]}}
+]}}}}}`
+
+func TestParsePullRequestsMoreThreads(t *testing.T) {
+	prs, err := parsePullRequests(fixtureMoreThreads)
+	if err != nil || len(prs) != 1 {
+		t.Fatalf("parsePullRequests() = %v, %v", prs, err)
+	}
+	if !prs[0].moreThreads {
+		t.Error("hasNextPage was not recorded")
+	}
+	if len(prs[0].Threads) != 2 {
+		t.Errorf("first page dropped: %d threads", len(prs[0].Threads))
+	}
+}
+
+func TestParseThreads(t *testing.T) {
+	got, err := parseThreads(fixtureThreadPages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Thread{
+		{Path: "internal/payment/service.go", Line: 87, Author: "grace", Body: "Should this be a 409?",
+			URL: "https://github.com/acme/pay/pull/42#discussion_r1", Replies: 2, Resolved: true},
+		{Path: "README.md", Body: "typo", URL: "https://github.com/acme/pay/pull/42#discussion_r2", Outdated: true},
+		{Path: "internal/payment/service.go", Line: 90, Author: "linus", Body: "Second page",
+			URL: "https://github.com/acme/pay/pull/42#discussion_r3"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseThreads() =\n%+v\nwant\n%+v", got, want)
+	}
+}
+
+func TestParseThreadsErrors(t *testing.T) {
+	if _, err := parseThreads(`{"data":{"repository":null}}`); !errors.Is(err, ErrNotFound) {
+		t.Errorf("repository null: error = %v, want ErrNotFound", err)
+	}
+	for _, out := range []string{"", "not json", `{"data":{"repository":{"pullRequest":null}}}`, fixtureThreadPages[:40]} {
+		if threads, err := parseThreads(out); err == nil {
+			t.Errorf("parseThreads(%q) = %v, want error", out, threads)
+		}
 	}
 }
 
@@ -113,5 +171,9 @@ func TestHasGraphQLError(t *testing.T) {
 	}
 	if hasGraphQLError("", "NOT_FOUND") || hasGraphQLError(`{"message":"Bad credentials"}`, "NOT_FOUND") {
 		t.Error("error detected in a response without GraphQL errors")
+	}
+	// Under --paginate a failing page follows the good ones in the same stdout.
+	if !hasGraphQLError(`{"data":{"ok":true}}`+out, "NOT_FOUND") {
+		t.Error("NOT_FOUND not detected in the second of two pages")
 	}
 }

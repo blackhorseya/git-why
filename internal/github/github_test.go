@@ -24,6 +24,9 @@ func TestPullRequest(t *testing.T) {
 	if pr.Number != 42 || pr.Author != "ada" || len(pr.Issues) != 1 || len(pr.Threads) != 2 {
 		t.Fatalf("PullRequest() = %+v", pr)
 	}
+	if stub.Calls() != 1 {
+		t.Errorf("gh ran %d times for a pull request whose threads fit one page, want 1", stub.Calls())
+	}
 
 	args := stub.Args()
 	for _, want := range []string{"api", "graphql", "--hostname", "github.com", "owner=acme", "name=pay", "oid=" + testHash} {
@@ -33,6 +36,55 @@ func TestPullRequest(t *testing.T) {
 	}
 	if i := slices.Index(args, "query="+pullRequestQuery); i < 0 || args[i-1] != "-f" {
 		t.Errorf("query was not passed as a raw -f field: %q", args)
+	}
+}
+
+func TestPullRequestFetchesAllThreads(t *testing.T) {
+	stub := testrepo.StubGHCalls(t, fixtureMoreThreads, fixtureThreadPages)
+
+	pr, err := New(stub.Bin).PullRequest(t.Context(), testRemote, testHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stub.Calls() != 2 {
+		t.Fatalf("gh ran %d times, want 2 (pull request, then its thread pages)", stub.Calls())
+	}
+	// The pages start from the first thread, so they replace the first page
+	// instead of duplicating it.
+	var bodies []string
+	for _, th := range pr.Threads {
+		bodies = append(bodies, th.Body)
+	}
+	if want := []string{"Should this be a 409?", "typo", "Second page"}; !slices.Equal(bodies, want) {
+		t.Errorf("Threads = %q, want %q", bodies, want)
+	}
+	if pr.moreThreads {
+		t.Error("moreThreads still set after fetching every page")
+	}
+
+	args := stub.Args()
+	for _, want := range []string{"api", "graphql", "--paginate", "--hostname", "github.com", "query=" + threadsQuery, "owner=acme", "name=pay"} {
+		if !slices.Contains(args, want) {
+			t.Errorf("thread pages were not requested with %q: %q", want, args)
+		}
+	}
+	// $number is declared Int; a -f string is rejected by the API.
+	if i := slices.Index(args, "number=42"); i < 0 || args[i-1] != "-F" {
+		t.Errorf("number was not passed as a typed -F field: %q", args)
+	}
+}
+
+func TestPullRequestThreadPagesFail(t *testing.T) {
+	stub := testrepo.StubGHCalls(t, fixtureMoreThreads, "not json")
+
+	// A broken second call fails the lookup rather than quietly keeping the
+	// first page: silently missing threads is the bug paging exists to fix.
+	_, err := New(stub.Bin).PullRequest(t.Context(), testRemote, testHash)
+	if err == nil {
+		t.Fatal("PullRequest() succeeded with unreadable thread pages")
+	}
+	if want := "acme/pay@8ac912f: unexpected gh output: "; !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("error = %q, want prefix %q", err, want)
 	}
 }
 

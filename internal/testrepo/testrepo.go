@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -116,11 +117,11 @@ func (x *Repo) String() string {
 	return fmt.Sprintf("testrepo(%s)", x.Dir)
 }
 
-// GHStub is a fake gh executable that replays one canned response.
+// GHStub is a fake gh executable that replays canned responses.
 type GHStub struct {
 	// Bin is the path of the fake executable.
-	Bin      string
-	argsFile string
+	Bin string
+	dir string
 }
 
 // StubGH installs a fake gh at the front of PATH that writes stdout and
@@ -128,33 +129,69 @@ type GHStub struct {
 // asked with Args.
 func StubGH(t testing.TB, stdout, stderr string, code int) *GHStub {
 	t.Helper()
+	return stubGH(t, []string{stdout}, stderr, code)
+}
+
+// StubGHCalls installs a fake gh that answers its first call with
+// stdouts[0], its second with stdouts[1] and so on, repeating the last one
+// once they run out, always exiting 0. git-why calls gh a second time only
+// to page through a pull request's review threads.
+func StubGHCalls(t testing.TB, stdouts ...string) *GHStub {
+	t.Helper()
+	return stubGH(t, stdouts, "", 0)
+}
+
+func stubGH(t testing.TB, stdouts []string, stderr string, code int) *GHStub {
+	t.Helper()
 	dir := t.TempDir()
-	outFile := filepath.Join(dir, "stdout")
-	errFile := filepath.Join(dir, "stderr")
-	argsFile := filepath.Join(dir, "args")
-	for path, content := range map[string]string{outFile: stdout, errFile: stderr} {
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	files := map[string]string{"stderr": stderr, "stdout.last": stdouts[len(stdouts)-1]}
+	for n, out := range stdouts {
+		files["stdout."+strconv.Itoa(n+1)] = out
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\0' \"$@\" > %q\ncat %q\ncat %q >&2\nexit %d\n",
-		argsFile, outFile, errFile, code)
+	// Each run counts itself, records its arguments and prints the stdout
+	// for its ordinal, or the last one.
+	script := fmt.Sprintf(`#!/bin/sh
+d=%q
+n=$(($(cat "$d/calls" 2>/dev/null || echo 0) + 1))
+echo "$n" > "$d/calls"
+printf '%%s\0' "$@" > "$d/args"
+f="$d/stdout.$n"
+[ -f "$f" ] || f="$d/stdout.last"
+cat "$f"
+cat "$d/stderr" >&2
+exit %d
+`, dir, code)
 	bin := filepath.Join(dir, "gh")
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return &GHStub{Bin: bin, argsFile: argsFile}
+	return &GHStub{Bin: bin, dir: dir}
 }
 
 // Args returns the arguments of the last call to the stub, or nil when it
 // never ran.
 func (x *GHStub) Args() []string {
-	b, err := os.ReadFile(x.argsFile)
+	b, err := os.ReadFile(filepath.Join(x.dir, "args"))
 	if errors.Is(err, fs.ErrNotExist) || len(b) == 0 {
 		return nil
 	}
 	return strings.Split(strings.TrimSuffix(string(b), "\x00"), "\x00")
+}
+
+// Calls returns how many times the stub ran.
+func (x *GHStub) Calls() int {
+	b, err := os.ReadFile(filepath.Join(x.dir, "calls"))
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	return n
 }
