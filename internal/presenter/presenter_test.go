@@ -10,8 +10,10 @@ import (
 	"github.com/blackhorseya/git-why/internal/git"
 )
 
+// day builds fixture dates in the local zone: the presenter converts
+// GitHub's UTC timestamps with Local(), which must not move the date.
 func day(d int) time.Time {
-	return time.Date(2026, 8, d, 10, 0, 0, 0, time.UTC)
+	return time.Date(2026, 8, d, 10, 0, 0, 0, time.Local)
 }
 
 func sampleReport() Report {
