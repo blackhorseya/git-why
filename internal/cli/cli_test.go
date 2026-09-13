@@ -47,6 +47,29 @@ func paymentRepo(t *testing.T) (*testrepo.Repo, []string) {
 	return r, []string{fix, ttl, initial}
 }
 
+func TestRunShallowClone(t *testing.T) {
+	r, _ := paymentRepo(t)
+	clone := filepath.Join(t.TempDir(), "clone")
+	r.Git("clone", "-q", "--depth", "1", "file://"+r.Dir, clone)
+	t.Chdir(clone)
+
+	res := run(t, "internal/payment/service.go:3")
+	if res.code != exitOK {
+		t.Fatalf("exit code = %d, stderr:\n%s", res.code, res.stderr)
+	}
+	assertInOrder(t, res.stdout,
+		"Changed with",
+		"  (shallow clone: parent commit missing, changed files unknown)",
+		"Line history",
+		"  (shallow clone: older history may be missing)",
+	)
+	// Without a parent, git would diff against the empty tree and list
+	// every file in the repository.
+	if strings.Contains(res.stdout, "repository.go") {
+		t.Errorf("Changed with listed the whole tree of a shallow clone:\n%s", res.stdout)
+	}
+}
+
 func TestRunExplainsLine(t *testing.T) {
 	r, commits := paymentRepo(t)
 	t.Chdir(r.Dir)

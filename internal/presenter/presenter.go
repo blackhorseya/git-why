@@ -83,7 +83,7 @@ func Render(w io.Writer, r Report) error {
 		introduced(r),
 		pullRequest(r),
 		reviewDiscussion(r),
-		changedWith(r.ChangedWith),
+		changedWith(r),
 		history(r),
 	} {
 		if s != "" {
@@ -265,8 +265,12 @@ func threadMeta(t github.Thread) string {
 	return strings.Join(parts, ", ")
 }
 
-func changedWith(files []string) string {
+func changedWith(r Report) string {
 	out := []string{headingStyle.Render("Changed with")}
+	if r.Blame.Boundary {
+		return lines(append(out, "  "+dimStyle.Render("(shallow clone: parent commit missing, changed files unknown)"))...)
+	}
+	files := r.ChangedWith
 	if len(files) == 0 {
 		return lines(append(out, "  "+dimStyle.Render("(no other files)"))...)
 	}
