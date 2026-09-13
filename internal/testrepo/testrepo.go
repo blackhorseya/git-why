@@ -48,6 +48,8 @@ func New(t testing.TB) *Repo {
 	t.Setenv("GH_CONFIG_DIR", t.TempDir())
 	t.Setenv("GH_TOKEN", "")
 	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_ENTERPRISE_TOKEN", "")
+	t.Setenv("GITHUB_ENTERPRISE_TOKEN", "")
 	t.Setenv("GH_HOST", "")
 
 	x := &Repo{t: t, Dir: t.TempDir()}

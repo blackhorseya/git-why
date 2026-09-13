@@ -114,6 +114,49 @@ func TestRunIgnoresNonGitHubRemote(t *testing.T) {
 	}
 }
 
+func TestRunEnterpriseRemote(t *testing.T) {
+	t.Run("GH_HOST remote is looked up on that host", func(t *testing.T) {
+		r, commits := paymentRepo(t)
+		t.Setenv("GH_HOST", "ghe.example.com")
+		r.Git("remote", "add", "origin", "git@GHE.example.com:acme/pay.git")
+		stub := testrepo.StubGH(t, pullRequestFixture, "", 0)
+		t.Chdir(r.Dir)
+
+		res := run(t, "internal/payment/service.go:3")
+		if res.code != exitOK {
+			t.Fatalf("exit code = %d, stderr:\n%s", res.code, res.stderr)
+		}
+		if !strings.Contains(res.stdout, "  #42  fix: prevent duplicate payment processing") {
+			t.Errorf("pull request missing from stdout:\n%s", res.stdout)
+		}
+		args := stub.Args()
+		for _, want := range []string{"--hostname", "ghe.example.com", "owner=acme", "name=pay", "oid=" + commits[0]} {
+			if !slices.Contains(args, want) {
+				t.Errorf("gh was not called with %q: %q", want, args)
+			}
+		}
+	})
+
+	t.Run("other hosts stay ignored", func(t *testing.T) {
+		r, _ := paymentRepo(t)
+		t.Setenv("GH_HOST", "ghe.example.com")
+		r.Git("remote", "add", "origin", "https://gitlab.com/acme/pay.git")
+		stub := testrepo.StubGH(t, pullRequestFixture, "", 0)
+		t.Chdir(r.Dir)
+
+		res := run(t, "internal/payment/service.go:3")
+		if res.code != exitOK {
+			t.Fatalf("exit code = %d, stderr:\n%s", res.code, res.stderr)
+		}
+		if strings.Contains(res.stdout, "Pull request") {
+			t.Errorf("a GitLab remote produced a pull request section:\n%s", res.stdout)
+		}
+		if args := stub.Args(); args != nil {
+			t.Errorf("gh ran for a GitLab remote: %q", args)
+		}
+	})
+}
+
 func TestRunPrefersUpstreamRemote(t *testing.T) {
 	r, _ := paymentRepo(t)
 	r.Git("remote", "add", "origin", "git@github.com:fork/pay.git")
