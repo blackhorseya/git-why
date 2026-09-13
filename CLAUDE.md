@@ -44,7 +44,7 @@ presenter.Render
 - Only parse machine formats: `blame --porcelain`, `-z`, and `commitFormat` (`%x1f`-separated, body last). Parsers in `parse.go` are pure functions with fixture-string unit tests; `git.go` is covered by integration tests.
 - `run` sets `LC_ALL=C` because some error detection matches stderr (e.g. "not a git repository"), and `GIT_LITERAL_PATHSPECS=1` so `*` / `[` in file names aren't globbed.
 - Changed files use `git log -1 --diff-merges=first-parent`, not `diff-tree`: `diff-tree` ignores `--first-parent` on merges and lists every parent's diff. This sets the minimum Git version to 2.31 (documented in README).
-- Blame porcelain marks *every* parentless commit as `boundary`, including a normal repo's first commit. `Blame` only keeps `Boundary` when `rev-parse --is-shallow-repository` is true.
+- Blame porcelain marks *every* parentless commit as `boundary`, including a normal repo's first commit. `Blame` only keeps `Boundary` when `rev-parse --is-shallow-repository` is true. For a boundary commit `cli.explain` skips `ChangedFiles` (git would diff against the empty tree and list the whole repository) and the presenter says the files are unknown.
 - `RemoteURL` uses `git remote get-url` (not `git config`) so `url.<base>.insteadOf` rewrites are applied.
 
 ### GitHub client invariants (`internal/github`)

@@ -95,7 +95,6 @@ func TestRenderEdgeCases(t *testing.T) {
 	r.Text = "   "
 	r.Blame.OrigPath = "internal/payments/service.go"
 	r.Blame.OrigLine = 80
-	r.Blame.Boundary = true
 	r.HistoryTruncated = true
 	r.ChangedWith = nil
 	for i := range 12 {
@@ -113,7 +112,6 @@ func TestRenderEdgeCases(t *testing.T) {
 		"  Path:   internal/payments/service.go (renamed since)\n",
 		"  file09.go\n  … and 2 more\n",
 		"  … more: git log -L 80,80:internal/payments/service.go 8ac912f\n",
-		"  (shallow clone: older history may be missing)\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Render() missing %q in:\n%s", want, got)
@@ -121,6 +119,30 @@ func TestRenderEdgeCases(t *testing.T) {
 	}
 	if strings.Contains(got, "file10.go") {
 		t.Errorf("Render() listed more than %d changed files:\n%s", maxChangedFiles, got)
+	}
+}
+
+func TestRenderShallowBoundary(t *testing.T) {
+	r := sampleReport()
+	r.Blame.Boundary = true
+	r.ChangedWith = nil // cli leaves the files unknown for a boundary commit
+
+	var buf bytes.Buffer
+	if err := Render(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+
+	for _, want := range []string{
+		"Changed with\n  (shallow clone: parent commit missing, changed files unknown)\n",
+		"  (shallow clone: older history may be missing)\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Render() missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "(no other files)") {
+		t.Errorf("Render() reported no files instead of unknown files:\n%s", got)
 	}
 }
 

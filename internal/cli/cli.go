@@ -131,9 +131,14 @@ func explain(c context.Context, arg string, offline bool, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	files, err := repo.ChangedFiles(c, blame.Hash)
-	if err != nil {
-		return err
+	// A shallow boundary has no parent locally: git would diff the commit
+	// against nothing and list the whole tree, so leave the files unknown.
+	var files []string
+	if !blame.Boundary {
+		files, err = repo.ChangedFiles(c, blame.Hash)
+		if err != nil {
+			return err
+		}
 	}
 	// Ask for one extra commit to learn whether older history was cut off.
 	history, err := repo.LineHistory(c, blame.OrigPath, blame.OrigLine, blame.Hash, historyLimit+1)
