@@ -109,8 +109,9 @@ first (a fork's pull requests live there), then `origin`, then the rest.
 
 A GitHub problem never changes the exit code or hides the local history: the
 `Pull request` section just explains what happened, for example that the
-commit has not been pushed yet, that `gh` is not logged in, or that the
-commit was pushed without a pull request.
+commit has not been pushed yet, that `gh` is not logged in, that the commit
+was pushed without a pull request, or that GitHub did not answer within ten
+seconds.
 
 Pass `--offline` to skip the lookup entirely. That is also the only network
 access `git-why` ever makes — no telemetry, no config files.

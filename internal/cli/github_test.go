@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blackhorseya/git-why/internal/testrepo"
 )
@@ -194,6 +195,46 @@ func TestRunGitHubNotes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunGitHubTimeout(t *testing.T) {
+	r, _ := githubRepo(t)
+	slowGH(t)
+	t.Chdir(r.Dir)
+	restore := githubTimeout
+	githubTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { githubTimeout = restore })
+
+	start := time.Now()
+	res := run(t, "internal/payment/service.go:3")
+	elapsed := time.Since(start)
+	if res.code != exitOK {
+		t.Fatalf("exit code = %d, stderr:\n%s", res.code, res.stderr)
+	}
+	if res.stderr != "" {
+		t.Errorf("a GitHub timeout wrote to stderr: %s", res.stderr)
+	}
+	want := fmt.Sprintf("Pull request\n  (GitHub lookup timed out after %s)\n", githubTimeout)
+	if !strings.Contains(res.stdout, want) {
+		t.Errorf("stdout missing note %q:\n%s", want, res.stdout)
+	}
+	// The stub sleeps far longer than the timeout; the report must not
+	// wait for it.
+	if limit := 3 * time.Second; elapsed > limit {
+		t.Errorf("run took %s, timeout of %s did not bound the gh call", elapsed, githubTimeout)
+	}
+}
+
+// slowGH installs a gh that never answers. It execs sleep so the kill on
+// timeout reaches the sleeping process rather than a shell wrapper.
+func slowGH(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\nexec sleep 30\n"
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func TestRunWithoutGitHubCLI(t *testing.T) {

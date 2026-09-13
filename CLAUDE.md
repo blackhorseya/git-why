@@ -53,7 +53,7 @@ presenter.Render
 - Only github.com remotes are recognised (`ParseRemote`); `Remote.Host` exists so `--hostname` is already wired for GHES later.
 - Error mapping is driven by gh's observable behaviour, verified against the real API: exit 4 → `ErrNotLoggedIn`; stderr `HTTP 401` → `ErrBadCredentials`; stderr "rate limit" → `ErrRateLimited`; stdout GraphQL `errors[].type == NOT_FOUND` → `ErrNotFound` (repo missing or not visible); `object: null` → `ErrCommitNotFound` (not pushed); empty `nodes` → `ErrNoPullRequest`. Anything else stays a `*CommandError` whose message is gh's first stderr line.
 - `pick` prefers the earliest-merged PR (the one that introduced the commit) over later/unmerged ones.
-- In `cli`, a GitHub problem never changes the exit code or writes to stderr: `cli.pullRequest` turns it into `presenter.GitHub.Note`, shown dimmed under "Pull request". A nil `presenter.GitHub` (offline, no GitHub remote) omits the section entirely. The gh call is bounded by `githubTimeout`; a parent-context cancel (Ctrl-C) still aborts the command.
+- In `cli`, a GitHub problem never changes the exit code or writes to stderr: `cli.pullRequest` turns it into `presenter.GitHub.Note`, shown dimmed under "Pull request". A nil `presenter.GitHub` (offline, no GitHub remote) omits the section entirely. The gh call is bounded by `githubTimeout` (a package variable so tests can shrink it); a parent-context cancel (Ctrl-C) still aborts the command. `run` sets `cmd.WaitDelay` so a killed gh that left a child holding the stdio pipes cannot keep `Run` blocked past the bound.
 - Remote preference is `upstream`, then `origin`, then the rest (`cli.preferRemotes`) — forks keep their PRs upstream.
 
 ### Errors and exit codes
