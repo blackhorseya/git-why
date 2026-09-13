@@ -2,14 +2,30 @@ package github
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 )
 
+// threadFields selects one page of review threads with the comment that
+// opened each thread. Both queries share it so their pages parse into the
+// same threadConnection.
+const threadFields = `pageInfo { hasNextPage endCursor }
+          nodes {
+            path line isResolved isOutdated
+            comments(first: 1) {
+              totalCount
+              nodes { body url author { login } }
+            }
+          }`
+
 // pullRequestQuery fetches, in one round trip, the pull requests that
-// contain a commit together with the issues they close and their review
-// threads. object is null when the commit is not on GitHub; repository is
-// null (with a NOT_FOUND error) when the repository is not visible.
+// contain a commit together with the issues they close and the first
+// hundred of their review threads. object is null when the commit is not
+// on GitHub; repository is null (with a NOT_FOUND error) when the
+// repository is not visible.
 const pullRequestQuery = `query($owner: String!, $name: String!, $oid: GitObjectID!) {
   repository(owner: $owner, name: $name) {
     object(oid: $oid) {
@@ -22,16 +38,24 @@ const pullRequestQuery = `query($owner: String!, $name: String!, $oid: GitObject
               nodes { number title url state }
             }
             reviewThreads(first: 100) {
-              nodes {
-                path line isResolved isOutdated
-                comments(first: 1) {
-                  totalCount
-                  nodes { body url author { login } }
-                }
-              }
+              ` + threadFields + `
             }
           }
         }
+      }
+    }
+  }
+}`
+
+// threadsQuery fetches every review thread of one pull request. It runs
+// under gh's --paginate, which needs the $endCursor variable and the
+// pageInfo selection to follow the pages, and prints one JSON document per
+// page.
+const threadsQuery = `query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $endCursor) {
+        ` + threadFields + `
       }
     }
   }
@@ -47,10 +71,23 @@ type response struct {
 			} `json:"object"`
 		} `json:"repository"`
 	} `json:"data"`
-	Errors []struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
-	} `json:"errors"`
+	Errors []graphQLError `json:"errors"`
+}
+
+// threadsResponse is one page of threadsQuery.
+type threadsResponse struct {
+	Data struct {
+		Repository *struct {
+			PullRequest *struct {
+				ReviewThreads threadConnection `json:"reviewThreads"`
+			} `json:"pullRequest"`
+		} `json:"repository"`
+	} `json:"data"`
+}
+
+type graphQLError struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
 }
 
 type actor struct {
@@ -68,9 +105,14 @@ type pullRequestNode struct {
 	ClosingIssuesReferences struct {
 		Nodes []Issue `json:"nodes"`
 	} `json:"closingIssuesReferences"`
-	ReviewThreads struct {
-		Nodes []threadNode `json:"nodes"`
-	} `json:"reviewThreads"`
+	ReviewThreads threadConnection `json:"reviewThreads"`
+}
+
+type threadConnection struct {
+	PageInfo struct {
+		HasNextPage bool `json:"hasNextPage"`
+	} `json:"pageInfo"`
+	Nodes []threadNode `json:"nodes"`
 }
 
 type threadNode struct {
@@ -108,32 +150,66 @@ func parsePullRequests(out string) ([]PullRequest, error) {
 	return prs, nil
 }
 
+// parseThreads reads the pages that gh --paginate prints for threadsQuery:
+// whole JSON documents back to back, without a separator.
+func parseThreads(out string) ([]Thread, error) {
+	var threads []Thread
+	dec := json.NewDecoder(strings.NewReader(out))
+	for pages := 0; ; pages++ {
+		var page threadsResponse
+		err := dec.Decode(&page)
+		if errors.Is(err, io.EOF) {
+			if pages == 0 {
+				return nil, errors.New("unexpected gh output: no review thread pages")
+			}
+			return threads, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("unexpected gh output: %w", err)
+		}
+		if page.Data.Repository == nil {
+			return nil, ErrNotFound
+		}
+		if page.Data.Repository.PullRequest == nil {
+			return nil, errors.New("unexpected gh output: review thread page without a pull request")
+		}
+		for _, t := range page.Data.Repository.PullRequest.ReviewThreads.Nodes {
+			threads = append(threads, t.thread())
+		}
+	}
+}
+
 func (x pullRequestNode) pullRequest() PullRequest {
 	pr := PullRequest{
-		Number:   x.Number,
-		Title:    x.Title,
-		State:    x.State,
-		MergedAt: x.MergedAt,
-		URL:      x.URL,
-		Author:   login(x.Author),
-		Body:     x.Body,
-		Issues:   x.ClosingIssuesReferences.Nodes,
+		Number:      x.Number,
+		Title:       x.Title,
+		State:       x.State,
+		MergedAt:    x.MergedAt,
+		URL:         x.URL,
+		Author:      login(x.Author),
+		Body:        x.Body,
+		Issues:      x.ClosingIssuesReferences.Nodes,
+		moreThreads: x.ReviewThreads.PageInfo.HasNextPage,
 	}
 	for _, t := range x.ReviewThreads.Nodes {
-		thread := Thread{
-			Path:     t.Path,
-			Line:     t.Line,
-			Resolved: t.IsResolved,
-			Outdated: t.IsOutdated,
-			Replies:  max(t.Comments.TotalCount-1, 0),
-		}
-		if len(t.Comments.Nodes) > 0 {
-			first := t.Comments.Nodes[0]
-			thread.Author, thread.Body, thread.URL = login(first.Author), first.Body, first.URL
-		}
-		pr.Threads = append(pr.Threads, thread)
+		pr.Threads = append(pr.Threads, t.thread())
 	}
 	return pr
+}
+
+func (x threadNode) thread() Thread {
+	thread := Thread{
+		Path:     x.Path,
+		Line:     x.Line,
+		Resolved: x.IsResolved,
+		Outdated: x.IsOutdated,
+		Replies:  max(x.Comments.TotalCount-1, 0),
+	}
+	if len(x.Comments.Nodes) > 0 {
+		first := x.Comments.Nodes[0]
+		thread.Author, thread.Body, thread.URL = login(first.Author), first.Body, first.URL
+	}
+	return thread
 }
 
 func login(a *actor) string {
@@ -161,17 +237,21 @@ func pick(prs []PullRequest) (PullRequest, bool) {
 	return PullRequest{}, false
 }
 
-// hasGraphQLError reports whether out is a GraphQL response carrying an
-// error of the given type.
+// hasGraphQLError reports whether out holds a GraphQL response (or, under
+// --paginate, a run of them) carrying an error of the given type.
 func hasGraphQLError(out, typ string) bool {
-	var resp response
-	if json.Unmarshal([]byte(out), &resp) != nil {
-		return false
-	}
-	for _, e := range resp.Errors {
-		if e.Type == typ {
-			return true
+	dec := json.NewDecoder(strings.NewReader(out))
+	for {
+		var resp struct {
+			Errors []graphQLError `json:"errors"`
+		}
+		if dec.Decode(&resp) != nil {
+			return false
+		}
+		for _, e := range resp.Errors {
+			if e.Type == typ {
+				return true
+			}
 		}
 	}
-	return false
 }

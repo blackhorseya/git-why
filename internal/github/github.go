@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -27,6 +28,10 @@ type PullRequest struct {
 	Issues []Issue
 	// Threads are the review threads on the pull request's diff.
 	Threads []Thread
+	// moreThreads records that Threads holds only the first page GitHub
+	// returned; Client.PullRequest then fetches every thread through
+	// threadsQuery.
+	moreThreads bool
 }
 
 // Issue is an issue linked to a pull request.
@@ -75,29 +80,71 @@ func New(bin string) *Client {
 // PullRequest returns the pull request that introduced the commit with the
 // full object id hash into remote. When several pull requests contain the
 // commit, the one merged first wins; an unmerged one is returned only when
-// no merged one exists.
+// no merged one exists. A pull request with more review threads than one
+// query returns costs a second, paginated gh call so none are dropped.
 func (i *Client) PullRequest(c context.Context, remote Remote, hash string) (PullRequest, error) {
-	out, err := i.run(c, "api", "graphql", "--hostname", remote.Host,
+	pr, err := i.pullRequest(c, remote, hash)
+	if err != nil {
+		return PullRequest{}, fmt.Errorf("%s@%s: %w", remote, short(hash), err)
+	}
+	return pr, nil
+}
+
+func (i *Client) pullRequest(c context.Context, remote Remote, hash string) (PullRequest, error) {
+	out, err := i.graphql(c, "--hostname", remote.Host,
 		"-f", "query="+pullRequestQuery,
 		"-f", "owner="+remote.Owner,
 		"-f", "name="+remote.Name,
 		"-f", "oid="+hash)
 	if err != nil {
-		if ce, ok := errors.AsType[*CommandError](err); ok {
-			err = classify(ce)
-		}
-		return PullRequest{}, fmt.Errorf("%s@%s: %w", remote, short(hash), err)
+		return PullRequest{}, err
 	}
-
 	prs, err := parsePullRequests(out)
 	if err != nil {
-		return PullRequest{}, fmt.Errorf("%s@%s: %w", remote, short(hash), err)
+		return PullRequest{}, err
 	}
 	pr, ok := pick(prs)
 	if !ok {
-		return PullRequest{}, fmt.Errorf("%s@%s: %w", remote, short(hash), ErrNoPullRequest)
+		return PullRequest{}, ErrNoPullRequest
+	}
+	if pr.moreThreads {
+		// The pages start over from the first thread, so they replace the
+		// first page rather than extend it.
+		if pr.Threads, err = i.threads(c, remote, pr.Number); err != nil {
+			return PullRequest{}, err
+		}
+		pr.moreThreads = false
 	}
 	return pr, nil
+}
+
+// threads fetches every review thread of pull request number. gh follows
+// the pages itself and prints one JSON document per page.
+func (i *Client) threads(c context.Context, remote Remote, number int) ([]Thread, error) {
+	out, err := i.graphql(c, "--paginate", "--hostname", remote.Host,
+		"-f", "query="+threadsQuery,
+		"-f", "owner="+remote.Owner,
+		"-f", "name="+remote.Name,
+		// $number is an Int: -F sends a typed value, -f would send a string
+		// the API refuses to coerce.
+		"-F", "number="+strconv.Itoa(number))
+	if err != nil {
+		return nil, err
+	}
+	return parseThreads(out)
+}
+
+// graphql runs one gh api graphql command and maps its failures onto the
+// package's sentinel errors.
+func (i *Client) graphql(c context.Context, args ...string) (string, error) {
+	out, err := i.run(c, append([]string{"api", "graphql"}, args...)...)
+	if err != nil {
+		if ce, ok := errors.AsType[*CommandError](err); ok {
+			return "", classify(ce)
+		}
+		return "", err
+	}
+	return out, nil
 }
 
 // classify maps gh's exit status and output onto the package's sentinel

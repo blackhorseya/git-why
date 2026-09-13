@@ -39,6 +39,43 @@ func githubRepo(t *testing.T) (*testrepo.Repo, []string) {
 	return r, commits
 }
 
+// TestRunShowsThreadsBeyondFirstPage covers a pull request with more review
+// threads than one query returns: the thread on the target file sits on the
+// second page and must still be shown.
+func TestRunShowsThreadsBeyondFirstPage(t *testing.T) {
+	r, _ := githubRepo(t)
+	first := strings.Replace(pullRequestFixture, `"reviewThreads":{"nodes":[`, `"reviewThreads":{"pageInfo":{"hasNextPage":true},"nodes":[`, 1)
+	pages := `{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":true,"endCursor":"c1"},"nodes":[
+  {"path":"internal/payment/repository.go","line":9,"isResolved":false,"isOutdated":false,
+   "comments":{"totalCount":1,"nodes":[{"body":"nit: rename","url":"https://github.com/acme/pay/pull/42#discussion_r2","author":{"login":"grace"}}]}}
+ ]}}}}}{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":"c2"},"nodes":[
+  {"path":"internal/payment/service.go","line":3,"isResolved":false,"isOutdated":false,
+   "comments":{"totalCount":1,"nodes":[{"body":"Found on the second page","url":"https://github.com/acme/pay/pull/42#discussion_r3","author":{"login":"linus"}}]}}
+ ]}}}}}`
+	stub := testrepo.StubGHCalls(t, first, pages)
+	t.Chdir(r.Dir)
+
+	res := run(t, "internal/payment/service.go:3")
+	if res.code != exitOK {
+		t.Fatalf("exit code = %d, stderr:\n%s", res.code, res.stderr)
+	}
+	assertInOrder(t, res.stdout,
+		"Pull request",
+		"  #42  fix: prevent duplicate payment processing",
+		"Review discussion",
+		"  @linus (L3, unresolved)",
+		"    Found on the second page",
+		"  … 1 more thread on other files",
+		"Changed with",
+	)
+	if strings.Contains(res.stdout, "Should this be a 409") {
+		t.Errorf("first-page thread survived the refetch:\n%s", res.stdout)
+	}
+	if stub.Calls() != 2 || !slices.Contains(stub.Args(), "--paginate") {
+		t.Errorf("gh ran %d times, last args %q; want a second --paginate call", stub.Calls(), stub.Args())
+	}
+}
+
 func TestRunShowsPullRequest(t *testing.T) {
 	r, commits := githubRepo(t)
 	stub := testrepo.StubGH(t, pullRequestFixture, "", 0)
