@@ -164,7 +164,8 @@ func pullRequestMeta(pr *github.PullRequest) string {
 	}
 	switch pr.State {
 	case "MERGED":
-		parts = append(parts, "merged "+pr.MergedAt.Format(dateLayout))
+		// GitHub reports UTC; show the day the reader would have seen.
+		parts = append(parts, "merged "+pr.MergedAt.Local().Format(dateLayout))
 	case "OPEN":
 		parts = append(parts, "open")
 	default:

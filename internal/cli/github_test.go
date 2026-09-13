@@ -48,12 +48,14 @@ func TestRunShowsPullRequest(t *testing.T) {
 	if res.code != exitOK {
 		t.Fatalf("exit code = %d, stderr:\n%s", res.code, res.stderr)
 	}
+	// The fixture's mergedAt is UTC; the report shows it in local time.
+	merged := time.Date(2026, 1, 4, 9, 0, 0, 0, time.UTC).Local().Format("2006-01-02")
 	assertInOrder(t, res.stdout,
 		"Introduced / Changed",
 		"  Retries from the gateway could charge twice.",
 		"Pull request",
 		"  #42  fix: prevent duplicate payment processing",
-		"  by ada · merged 2026-01-04 · https://github.com/acme/pay/pull/42",
+		"  by ada · merged "+merged+" · https://github.com/acme/pay/pull/42",
 		"  Closes #38  Duplicate charges on gateway retry",
 		"  ## Summary",
 		"  Retries from the gateway could charge twice.",
