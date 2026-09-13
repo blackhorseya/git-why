@@ -29,12 +29,12 @@ const (
 	exitTarget  = 4 // file missing, untracked, or line out of range
 )
 
-const (
-	// historyLimit caps how many commits the line history shows.
-	historyLimit = 10
-	// githubTimeout bounds the gh call so a slow network cannot hang git-why.
-	githubTimeout = 10 * time.Second
-)
+// historyLimit caps how many commits the line history shows.
+const historyLimit = 10
+
+// githubTimeout bounds the gh call so a slow network cannot hang git-why.
+// A variable so tests can shrink it.
+var githubTimeout = 10 * time.Second
 
 // Run executes git-why with args (excluding the program name) and returns
 // the process exit code.

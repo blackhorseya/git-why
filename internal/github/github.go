@@ -118,6 +118,9 @@ func classify(ce *CommandError) error {
 
 func (i *Client) run(c context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(c, i.bin, args...)
+	// After a timeout or interrupt kills gh, stop waiting for its stdio pipes
+	// as well: a child gh left behind would otherwise keep Run blocked.
+	cmd.WaitDelay = time.Second
 	cmd.Env = append(os.Environ(),
 		"GH_NO_UPDATE_NOTIFIER=1", // never mix update nags into stderr
 		"GH_PROMPT_DISABLED=1",    // fail instead of prompting
