@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,8 +13,10 @@ import (
 	"slices"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
+	"github.com/blackhorseya/git-why/internal/claude"
 	"github.com/blackhorseya/git-why/internal/git"
 	"github.com/blackhorseya/git-why/internal/github"
 	"github.com/blackhorseya/git-why/internal/presenter"
@@ -23,9 +26,9 @@ import (
 // Exit codes, as documented in the README.
 const (
 	exitOK      = 0
-	exitFailure = 1 // git failed or returned no usable history
+	exitFailure = 1 // git failed or returned no usable history; claude failed
 	exitUsage   = 2 // bad arguments or flags
-	exitEnv     = 3 // git missing, or not inside a repository
+	exitEnv     = 3 // git or claude missing, not logged in, not inside a repository
 	exitTarget  = 4 // file missing, untracked, or line out of range
 )
 
@@ -35,6 +38,10 @@ const historyLimit = 10
 // githubTimeout bounds the gh call so a slow network cannot hang git-why.
 // A variable so tests can shrink it.
 var githubTimeout = 10 * time.Second
+
+// askTimeout bounds the claude call. Answers took under ten seconds when
+// measured; the bound only stops a hung model from hanging git-why.
+var askTimeout = 3 * time.Minute
 
 // Run executes git-why with args (excluding the program name) and returns
 // the process exit code.
@@ -79,57 +86,119 @@ func newCommand(version string) *cobra.Command {
 			return explain(cmd.Context(), args[0], offline, cmd.OutOrStdout())
 		},
 	}
-	cmd.Flags().BoolVar(&offline, "offline", false, "skip the GitHub pull request lookup")
+	cmd.PersistentFlags().BoolVar(&offline, "offline", false, "skip the GitHub pull request lookup")
 	cmd.SetVersionTemplate("git-why {{.Version}}\n")
-	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
-		return &usageError{err: err}
+	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return &usageError{err: err, usage: usageLine(cmd)}
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "ask <file>:<line>",
+		Short: "Explain in a few sentences why the line exists, using Claude",
+		Long: "Builds the same report as git-why and asks Claude Code (claude) to sum it up\n" +
+			"in a few sentences. The report — commit messages, pull request text, review\n" +
+			"comments and the line itself — is sent to the Claude account claude is logged\n" +
+			"in with. claude runs without tools, settings, CLAUDE.md files or MCP servers.",
+		Example: "  git-why ask internal/payment/service.go:87\n" +
+			"  git why ask --offline main.go:42",
+		Args:          oneTarget,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return ask(cmd.Context(), args[0], offline, cmd.OutOrStdout())
+		},
 	})
 	return cmd
 }
 
-func oneTarget(_ *cobra.Command, args []string) error {
+func oneTarget(cmd *cobra.Command, args []string) error {
 	switch len(args) {
 	case 1:
 		return nil
 	case 0:
-		return &usageError{err: errors.New("missing <file>:<line> argument")}
+		return &usageError{err: errors.New("missing <file>:<line> argument"), usage: usageLine(cmd)}
 	default:
-		return &usageError{err: fmt.Errorf("expected one <file>:<line> argument, got %d", len(args))}
+		return &usageError{err: fmt.Errorf("expected one <file>:<line> argument, got %d", len(args)), usage: usageLine(cmd)}
 	}
+}
+
+// usageLine is the one-line synopsis of cmd, e.g. "git-why ask <file>:<line>".
+func usageLine(cmd *cobra.Command) string {
+	return cmd.CommandPath() + " <file>:<line>"
 }
 
 // explain gathers everything git-why reports about the line named by arg
 // and renders it to w. With offline set, GitHub is not consulted.
 func explain(c context.Context, arg string, offline bool, w io.Writer) error {
-	t, err := target.Parse(arg)
+	r, err := gather(c, arg, offline)
 	if err != nil {
 		return err
 	}
-	text, err := t.ReadLine()
+	return presenter.Render(w, r)
+}
+
+// ask gathers the same report, hands it to claude and writes the answer
+// to w. claude is looked up first so a missing one fails before any git
+// work is done.
+func ask(c context.Context, arg string, offline bool, w io.Writer) error {
+	client, err := claude.Find()
 	if err != nil {
 		return err
+	}
+	r, err := gather(c, arg, offline)
+	if err != nil {
+		return err
+	}
+	// The prompt is the report as the user would see it, minus any color
+	// a forcing environment variable could have added.
+	var report bytes.Buffer
+	if err := presenter.Render(&report, r); err != nil {
+		return err
+	}
+	ac, cancel := context.WithTimeout(c, askTimeout)
+	defer cancel()
+	answer, err := client.Ask(ac, ansi.Strip(report.String()))
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && c.Err() == nil {
+			return fmt.Errorf("claude did not answer within %s", askTimeout)
+		}
+		return err
+	}
+	return presenter.RenderAnswer(w, presenter.Answer{Report: r, Text: answer})
+}
+
+// gather runs the git queries (and, unless offline, the GitHub lookup)
+// behind the line named by arg.
+func gather(c context.Context, arg string, offline bool) (presenter.Report, error) {
+	t, err := target.Parse(arg)
+	if err != nil {
+		return presenter.Report{}, err
+	}
+	text, err := t.ReadLine()
+	if err != nil {
+		return presenter.Report{}, err
 	}
 
 	abs, err := filepath.Abs(t.Path)
 	if err != nil {
-		return fmt.Errorf("resolve %s: %w", t.Path, err)
+		return presenter.Report{}, fmt.Errorf("resolve %s: %w", t.Path, err)
 	}
 	repo, err := git.Open(c, filepath.Dir(abs))
 	if err != nil {
-		return err
+		return presenter.Report{}, err
 	}
 	path, err := repo.TrackedPath(c, abs)
 	if err != nil {
-		return fmt.Errorf("%s: %w", t.Path, err)
+		return presenter.Report{}, fmt.Errorf("%s: %w", t.Path, err)
 	}
 
 	blame, err := repo.Blame(c, path, t.Line)
 	if err != nil {
-		return err
+		return presenter.Report{}, err
 	}
 	commit, err := repo.Commit(c, blame.Hash)
 	if err != nil {
-		return err
+		return presenter.Report{}, err
 	}
 	// A shallow boundary has no parent locally: git would diff the commit
 	// against nothing and list the whole tree, so leave the files unknown.
@@ -137,13 +206,13 @@ func explain(c context.Context, arg string, offline bool, w io.Writer) error {
 	if !blame.Boundary {
 		files, err = repo.ChangedFiles(c, blame.Hash)
 		if err != nil {
-			return err
+			return presenter.Report{}, err
 		}
 	}
 	// Ask for one extra commit to learn whether older history was cut off.
 	history, err := repo.LineHistory(c, blame.OrigPath, blame.OrigLine, blame.Hash, historyLimit+1)
 	if err != nil {
-		return err
+		return presenter.Report{}, err
 	}
 	truncated := len(history) > historyLimit
 	if truncated {
@@ -154,11 +223,11 @@ func explain(c context.Context, arg string, offline bool, w io.Writer) error {
 	if !offline {
 		gh = pullRequest(c, repo, commit)
 		if err := c.Err(); err != nil {
-			return err // interrupted while waiting for gh
+			return presenter.Report{}, err // interrupted while waiting for gh
 		}
 	}
 
-	return presenter.Render(w, presenter.Report{
+	return presenter.Report{
 		Path:             path,
 		Line:             t.Line,
 		Text:             text,
@@ -168,7 +237,7 @@ func explain(c context.Context, arg string, offline bool, w io.Writer) error {
 		History:          history,
 		HistoryTruncated: truncated,
 		GitHub:           gh,
-	})
+	}, nil
 }
 
 // pullRequest looks up the pull request behind commit through gh. It
@@ -268,11 +337,12 @@ func githubNote(err error, remote github.Remote, short string) string {
 //
 //	exitUsage  (2)  usage error: missing or extra arguments, unknown flags
 //	                (*usageError), bad <file>:<line> syntax, invalid line number
-//	exitEnv    (3)  environment error: git not found, not inside a repository
+//	exitEnv    (3)  environment error: git not found, not inside a repository,
+//	                claude not found or not logged in (ask)
 //	exitTarget (4)  target error: file does not exist or is a directory, file
 //	                is untracked, line out of range
 //	exitFailure(1)  everything else: no commits yet, line not committed yet,
-//	                no history, git command failures
+//	                no history, git command failures, claude failures
 //
 // Errors arrive wrapped with context, so match with errors.Is / errors.AsType
 // rather than ==.
@@ -284,7 +354,8 @@ func exitCode(err error) int {
 	switch {
 	case errors.Is(err, target.ErrSyntax), errors.Is(err, target.ErrLine):
 		return exitUsage
-	case errors.Is(err, git.ErrGitNotFound), errors.Is(err, git.ErrNotRepository):
+	case errors.Is(err, git.ErrGitNotFound), errors.Is(err, git.ErrNotRepository),
+		errors.Is(err, claude.ErrClaudeNotFound), errors.Is(err, claude.ErrNotLoggedIn):
 		return exitEnv
 	case errors.Is(err, target.ErrNotFound), errors.Is(err, target.ErrIsDir),
 		errors.Is(err, target.ErrOutOfRange), errors.Is(err, git.ErrUntracked):
@@ -296,8 +367,8 @@ func exitCode(err error) int {
 // hint suggests how to fix err, or returns "" when there is nothing useful
 // to add beyond the error message itself.
 func hint(err error) string {
-	if _, ok := errors.AsType[*usageError](err); ok {
-		return "usage: git-why <file>:<line>  (see git-why --help)"
+	if ue, ok := errors.AsType[*usageError](err); ok {
+		return fmt.Sprintf("usage: %s  (see git-why --help)", ue.usage)
 	}
 
 	switch {
@@ -317,6 +388,10 @@ func hint(err error) string {
 		return "git-why explains committed history; `git add` and commit the file first"
 	case errors.Is(err, git.ErrNotCommitted):
 		return "this line has uncommitted changes; commit them or pick another line"
+	case errors.Is(err, claude.ErrClaudeNotFound):
+		return "install Claude Code from https://claude.com/claude-code and log in with `claude`; plain `git-why <file>:<line>` needs no AI"
+	case errors.Is(err, claude.ErrNotLoggedIn):
+		return "run `claude` and log in with /login"
 	}
 	return ""
 }
@@ -324,6 +399,8 @@ func hint(err error) string {
 // usageError marks errors caused by how the command was invoked.
 type usageError struct {
 	err error
+	// usage is the synopsis of the command that was invoked.
+	usage string
 }
 
 func (x *usageError) Error() string {

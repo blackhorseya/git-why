@@ -24,7 +24,10 @@ const (
 	maxBodyLines = 8
 	// maxThreads caps the review threads shown for the target file.
 	maxThreads = 3
-	dateLayout = "2006-01-02"
+	// maxProseWidth is the column claude's explanation must fit in, indent
+	// included.
+	maxProseWidth = 80
+	dateLayout    = "2006-01-02"
 )
 
 var (
@@ -35,6 +38,7 @@ var (
 	loginStyle   = lipgloss.NewStyle().Foreground(lipgloss.Cyan)
 	subjectStyle = lipgloss.NewStyle().Bold(true)
 	dimStyle     = lipgloss.NewStyle().Faint(true)
+	proseStyle   = lipgloss.NewStyle().Width(maxProseWidth - 2) // indented by two
 
 	// htmlComment matches the hidden instructions pull request templates
 	// leave in a description.
@@ -71,6 +75,29 @@ type Report struct {
 type GitHub struct {
 	PullRequest *github.PullRequest
 	Note        string
+}
+
+// Answer is claude's explanation of a line together with the report it
+// was drawn from.
+type Answer struct {
+	Report Report
+	// Text is the explanation, plain prose.
+	Text string
+}
+
+// RenderAnswer writes the explanation and, on one line, the sources it
+// rests on: the commit and, when there is one, the pull request.
+func RenderAnswer(w io.Writer, a Answer) error {
+	r := a.Report
+	sources := "Sources  " + hashStyle.Render(r.Commit.ShortHash)
+	if r.GitHub != nil && r.GitHub.PullRequest != nil {
+		pr := r.GitHub.PullRequest
+		sources += " · " + fmt.Sprintf("#%d", pr.Number) + " " + pr.URL
+	}
+	body := lines(indent(proseStyle.Render(strings.TrimSpace(a.Text)))...)
+	title := titleStyle.Render(fmt.Sprintf("Why does %s:%d exist?", r.Path, r.Line))
+	_, err := lipgloss.Fprint(w, lines(title, "", body, "", sources)+"\n")
+	return err
 }
 
 // Render writes the report to w. Colors are used only when w is a terminal
