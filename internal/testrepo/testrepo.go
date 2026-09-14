@@ -1,5 +1,5 @@
-// Package testrepo builds throwaway Git repositories and a fake gh
-// executable for integration tests.
+// Package testrepo builds throwaway Git repositories and fake gh and
+// claude executables for integration tests.
 package testrepo
 
 import (
@@ -52,6 +52,10 @@ func New(t testing.TB) *Repo {
 	t.Setenv("GH_ENTERPRISE_TOKEN", "")
 	t.Setenv("GITHUB_ENTERPRISE_TOKEN", "")
 	t.Setenv("GH_HOST", "")
+	// Likewise a real claude reached by accident finds no login and no API
+	// key, so it fails at once instead of spending the developer's money.
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("ANTHROPIC_API_KEY", "")
 
 	x := &Repo{t: t, Dir: t.TempDir()}
 	x.Git("init", "-q", "-b", "main")
@@ -117,8 +121,8 @@ func (x *Repo) String() string {
 	return fmt.Sprintf("testrepo(%s)", x.Dir)
 }
 
-// GHStub is a fake gh executable that replays canned responses.
-type GHStub struct {
+// Stub is a fake executable that replays canned responses.
+type Stub struct {
 	// Bin is the path of the fake executable.
 	Bin string
 	dir string
@@ -127,21 +131,28 @@ type GHStub struct {
 // StubGH installs a fake gh at the front of PATH that writes stdout and
 // stderr and exits with code, whatever it is asked. Inspect what it was
 // asked with Args.
-func StubGH(t testing.TB, stdout, stderr string, code int) *GHStub {
+func StubGH(t testing.TB, stdout, stderr string, code int) *Stub {
 	t.Helper()
-	return stubGH(t, []string{stdout}, stderr, code)
+	return stubExe(t, "gh", []string{stdout}, stderr, code)
 }
 
 // StubGHCalls installs a fake gh that answers its first call with
 // stdouts[0], its second with stdouts[1] and so on, repeating the last one
 // once they run out, always exiting 0. git-why calls gh a second time only
 // to page through a pull request's review threads.
-func StubGHCalls(t testing.TB, stdouts ...string) *GHStub {
+func StubGHCalls(t testing.TB, stdouts ...string) *Stub {
 	t.Helper()
-	return stubGH(t, stdouts, "", 0)
+	return stubExe(t, "gh", stdouts, "", 0)
 }
 
-func stubGH(t testing.TB, stdouts []string, stderr string, code int) *GHStub {
+// StubClaude installs a fake claude at the front of PATH. What it was
+// given on stdin is available through Stdin.
+func StubClaude(t testing.TB, stdout, stderr string, code int) *Stub {
+	t.Helper()
+	return stubExe(t, "claude", []string{stdout}, stderr, code)
+}
+
+func stubExe(t testing.TB, name string, stdouts []string, stderr string, code int) *Stub {
 	t.Helper()
 	dir := t.TempDir()
 	files := map[string]string{"stderr": stderr, "stdout.last": stdouts[len(stdouts)-1]}
@@ -154,31 +165,32 @@ func stubGH(t testing.TB, stdouts []string, stderr string, code int) *GHStub {
 		}
 	}
 
-	// Each run counts itself, records its arguments and prints the stdout
-	// for its ordinal, or the last one.
+	// Each run counts itself, records its arguments and stdin, and prints
+	// the stdout for its ordinal, or the last one.
 	script := fmt.Sprintf(`#!/bin/sh
 d=%q
 n=$(($(cat "$d/calls" 2>/dev/null || echo 0) + 1))
 echo "$n" > "$d/calls"
 printf '%%s\0' "$@" > "$d/args"
+cat > "$d/stdin"
 f="$d/stdout.$n"
 [ -f "$f" ] || f="$d/stdout.last"
 cat "$f"
 cat "$d/stderr" >&2
 exit %d
 `, dir, code)
-	bin := filepath.Join(dir, "gh")
+	bin := filepath.Join(dir, name)
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return &GHStub{Bin: bin, dir: dir}
+	return &Stub{Bin: bin, dir: dir}
 }
 
 // Args returns the arguments of the last call to the stub, or nil when it
 // never ran.
-func (x *GHStub) Args() []string {
+func (x *Stub) Args() []string {
 	b, err := os.ReadFile(filepath.Join(x.dir, "args"))
 	if errors.Is(err, fs.ErrNotExist) || len(b) == 0 {
 		return nil
@@ -186,8 +198,14 @@ func (x *GHStub) Args() []string {
 	return strings.Split(strings.TrimSuffix(string(b), "\x00"), "\x00")
 }
 
+// Stdin returns what the last call to the stub received on stdin.
+func (x *Stub) Stdin() string {
+	b, _ := os.ReadFile(filepath.Join(x.dir, "stdin"))
+	return string(b)
+}
+
 // Calls returns how many times the stub ran.
-func (x *GHStub) Calls() int {
+func (x *Stub) Calls() int {
 	b, err := os.ReadFile(filepath.Join(x.dir, "calls"))
 	if err != nil {
 		return 0
