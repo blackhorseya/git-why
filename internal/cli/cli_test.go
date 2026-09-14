@@ -181,7 +181,7 @@ func TestVersionAndHelp(t *testing.T) {
 	if res.code != exitOK {
 		t.Fatalf("--help exit code = %d", res.code)
 	}
-	for _, want := range []string{"git blame tells you who. git-why tells you why.", "git-why <file>:<line>", "--version", "--offline"} {
+	for _, want := range []string{"git blame tells you who. git-why tells you why.", "git-why <file>:<line>", "--version", "--offline", "ask "} {
 		if !strings.Contains(res.stdout, want) {
 			t.Errorf("--help missing %q:\n%s", want, res.stdout)
 		}
