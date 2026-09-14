@@ -70,14 +70,16 @@ mv git-why /usr/local/bin/
 
 `git-why` shells out to your local `git`, so Git 2.31 or newer must be
 installed. The pull request and review sections need the
-[GitHub CLI](https://cli.github.com) (`gh`) logged in; without it, everything
-else still works.
+[GitHub CLI](https://cli.github.com) (`gh`) logged in, and `git-why ask`
+needs [Claude Code](https://claude.com/claude-code) (`claude`) logged in;
+without them, everything else still works.
 
 ## Usage
 
 ```
 git-why <file>:<line>
 git-why --offline <file>:<line>
+git-why ask <file>:<line>
 git-why --version
 git-why --help
 ```
@@ -114,17 +116,55 @@ commit has not been pushed yet, that `gh` is not logged in, that the commit
 was pushed without a pull request, or that GitHub did not answer within ten
 seconds.
 
-Pass `--offline` to skip the lookup entirely. That is also the only network
-access `git-why` ever makes — no telemetry, no config files.
+Pass `--offline` to skip the lookup entirely. Apart from `ask` below, that
+is the only network access `git-why` ever makes — no telemetry, no config
+files.
+
+### AI explanation
+
+`git-why ask <file>:<line>` builds the same report and has
+[Claude Code](https://claude.com/claude-code) sum it up in a few sentences:
+
+```
+git-why ask internal/payment/service.go:87
+```
+
+```
+Why does internal/payment/service.go:87 exist?
+
+  The check exists because gateway retries could reach the charge endpoint
+  twice within the TTL window, so the service now looks the payment up first
+  and treats the second attempt as a no-op. It came in with pull request #42,
+  which closed the duplicate-charges issue; the review settled on keeping the
+  existing status code.
+
+Sources  8ac912f · #42 https://github.com/acme/pay/pull/42
+```
+
+The answer is drawn only from the report — when the history does not say
+why, it says so. What you would see on screen is exactly what is sent:
+the line itself, the commit's author name and email, its message, the list
+of files changed with it, the line's history, and the pull request's
+description and review comments on the file. It goes to the account
+`claude` is logged in with and costs one API call, so `ask` never runs
+unless you ask.
+
+`ask` needs the `claude` executable on your `PATH` and logged in (`claude`,
+then `/login`), or `ANTHROPIC_API_KEY` in the environment. It runs `claude`
+with no tools, no settings, no `CLAUDE.md` files, no MCP servers and no
+saved session, so your Claude Code setup does not colour the answer — which
+also means settings-based credentials (`apiKeyHelper`, Bedrock or Vertex
+`env` entries) are not read. `--offline` works here too and leaves the pull
+request out of the prompt. Tested with Claude Code 2.1.
 
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
 | `0`  | Success |
-| `1`  | Git failed or returned no usable history |
+| `1`  | Git failed or returned no usable history; `claude` failed to answer |
 | `2`  | Usage error — bad `<file>:<line>` syntax, missing argument, invalid line number |
-| `3`  | Environment error — not inside a Git repository, or `git` not found |
+| `3`  | Environment error — not inside a Git repository, `git` not found; for `ask`, `claude` not found or not logged in |
 | `4`  | Target error — file does not exist, is untracked, or the line is out of range |
 
 Every error message says what went wrong and, where it helps, what to do
@@ -142,6 +182,7 @@ same commands you would type by hand and stitches the results together:
 | What else changed in that commit? | `git log -1 --name-only --diff-merges=first-parent` |
 | How did this line evolve? | `git log -L <n>,<n>:<file>` |
 | Which pull request, which issues, what did reviewers say? | `gh api graphql` on the commit's `associatedPullRequests` |
+| So, why? (`ask`) | `claude -p` with the rendered report on stdin |
 
 The line history starts from the commit `blame` reports, using the file name
 and line number *as of that commit*, so renames and uncommitted edits
@@ -151,9 +192,9 @@ elsewhere in the file do not throw it off.
 
 - **v0.1 — Git history** ✓
 - **v0.2 — GitHub context** ✓: pull request, linked issues, review threads.
-- **v0.3 — AI explanation**: an optional `git-why ask <file>:<line>` that
-  summarises the history into a short "why". The core command will keep
-  working without it.
+- **v0.3 — AI explanation** ✓: `git-why ask <file>:<line>` sums the report
+  up in a few sentences through Claude Code. The core command keeps working
+  without it.
 
 ## Development
 
@@ -166,8 +207,9 @@ task lint
 ```
 
 Integration tests create throwaway Git repositories under the Go test temp
-directory and require `git` on your `PATH`. GitHub is never contacted from
-tests: they run a fake `gh` that replays canned responses.
+directory and require `git` on your `PATH`. GitHub and Claude are never
+contacted from tests: they run fake `gh` and `claude` executables that
+replay canned responses.
 
 ## License
 
